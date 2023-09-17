@@ -1387,7 +1387,7 @@ class ParallelTransformer(MegatronModule):
                 "Full recompute not supported for Retro."
             assert args.transformer_impl == 'local', \
                 "Transformer engine does not support Retro layers."
-        def build_layer(layer_number):
+        def build_layer(layer_number): # 根据layer_number构建layer
             if args.transformer_impl == 'local':
                 current_layer_type = _get_layer_type(
                     model_type, layer_type, self.retro_layer_numbers,
@@ -1452,6 +1452,8 @@ class ParallelTransformer(MegatronModule):
             # layers to stages like (each list is a model chunk):
             # Stage 0: [0, 1]  [4, 5]
             # Stage 1: [2, 3]  [6, 7]
+
+            # 
             offset = mpu.get_virtual_pipeline_model_parallel_rank() * (
                 config.num_layers // config.virtual_pipeline_model_parallel_size) + \
                 (mpu.get_pipeline_model_parallel_rank() * self.num_layers)
@@ -1467,6 +1469,7 @@ class ParallelTransformer(MegatronModule):
                     offset = (pipeline_rank - num_ranks_in_enc) * self.num_layers
             else:
                 offset = mpu.get_pipeline_model_parallel_rank() * self.num_layers
+            # offset用于确定当前 GPU 或设备应该负责哪些 Transformer 层
 
         if self.num_layers == 0:
             # When a standalone embedding stage is used (e.g.,
@@ -1480,6 +1483,7 @@ class ParallelTransformer(MegatronModule):
             self.num_layers = 1
             self.layers = torch.nn.ModuleList([ NoopTransformerLayer(1) ])
         else:
+            # 生成 Transformer 层
             self.layers = torch.nn.ModuleList(
                 [build_layer(i + 1 + offset) for i in range(self.num_layers)])
 

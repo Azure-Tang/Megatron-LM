@@ -57,7 +57,7 @@ def initialize_megatron(
     def finish_mpu_init():
         args = get_args()
         # Pytorch distributed.
-        _initialize_distributed()
+        _initialize_distributed() # 初始化并行化的参数等
 
         # Random seeds for reproducibility.
         if args.rank == 0:
@@ -166,7 +166,7 @@ def _initialize_distributed():
     """Initialize torch.distributed and core model parallel."""
     args = get_args()
 
-    device_count = torch.cuda.device_count()
+    device_count = torch.cuda.device_count() # 获取GPU数量 Q: 为什么这里不用mpu.get_data_parallel_world_size()? A：
     if torch.distributed.is_initialized():
 
         if args.rank == 0:
@@ -193,6 +193,7 @@ def _initialize_distributed():
                 args.local_rank = device
             torch.cuda.set_device(device)
     # Call the init process
+    # 分配进程组，每个进程组有多少个进程，每个进程的rank是多少
     torch.distributed.init_process_group(
         backend=args.distributed_backend,
         world_size=args.world_size,

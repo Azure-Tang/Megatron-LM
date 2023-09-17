@@ -96,7 +96,7 @@ def get_forward_backward_func():
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving
         else:
-            forward_backward_func = forward_backward_pipelining_without_interleaving
+            forward_backward_func = forward_backward_pipelining_without_interleaving # flush pipeline
     else:
         forward_backward_func = forward_backward_no_pipelining
     return forward_backward_func
@@ -209,7 +209,7 @@ def forward_step(
         parallel_state.is_pipeline_stage_after_split()
         and model_type == ModelType.encoder_and_decoder
     ):
-        return [output_tensor, input_tensor[-1]]
+        return [output_tensor, input_tensor[-1]] # 返回最后一层的encoder_hidden_state
     if unwrap_output_tensor:
         return output_tensor
     return [output_tensor]
@@ -1080,6 +1080,10 @@ def forward_backward_pipelining_without_interleaving(
     disable_grad_sync()
 
     # Compute number of warmup microbatches.
+    # num_microbatches为微批次数目
+    # 需要确定本worker在热身阶段需要执行的微批次数目，是min((world-size - rank - 1), num_microbatches)
+    # 因为rank是依次递增，所以热身所需的微批次会逐次递减，直到为0，这样就会直接进入稳定阶段进行计算
+    # 比如 world size 为5，rank区间为0～4，微批次数目为4，则从前往后几个stage的热身批次为 5 - 0 - 1， 5 - 1 - 1， 5 - 2 - 1， 5 - 3 - 1， 5 - 4 - 1。
     num_warmup_microbatches = (
         parallel_state.get_pipeline_model_parallel_world_size()
         - parallel_state.get_pipeline_model_parallel_rank()
@@ -1138,8 +1142,9 @@ def forward_backward_pipelining_without_interleaving(
             )
         else:
             checkpoint_activations_microbatch = None
-
+        # 接受上一个stage的输出
         input_tensor = recv_forward(recv_tensor_shapes, config)
+        # 执行前向传播
         output_tensor = forward_step(
             forward_step_func,
             data_iterator,
@@ -1151,6 +1156,7 @@ def forward_backward_pipelining_without_interleaving(
             collect_non_loss_data,
             checkpoint_activations_microbatch,
         )
+        # 发送到下一个stage
         send_forward(output_tensor, send_tensor_shapes, config)
 
         if not forward_only:
