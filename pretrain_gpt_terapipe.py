@@ -75,12 +75,12 @@ def get_batch(data_iterator):
     return tokens, labels, loss_mask, attention_mask, position_ids
 
 def loss_func(loss_mask, output_tensor):
+    args = get_args()
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
 
     # Check individual rank losses are not NaN prior to DP all-reduce.
-    args = get_args()
     if args.check_for_nan_in_loss_and_grad:
         global_rank = torch.distributed.get_rank()
         assert not loss.isnan(), (
@@ -104,6 +104,8 @@ def forward_step(data_iterator, model, cache, cache_seq_len=0):
     tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
         data_iterator)
     timers('batch-generator').stop()
+    from megatron import gpu_logger
+    gpu_logger(f'loss_mask.shape:{loss_mask.shape} \n loss_mask:{loss_mask} \n attention_mask.shape:{attention_mask.shape} \n attention_mask:{attention_mask}')
 
     output_tensor, cache_output = model(tokens, position_ids, attention_mask,
                           labels=labels, cache=cache, cache_seq_len=cache_seq_len)

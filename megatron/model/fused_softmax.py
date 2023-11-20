@@ -144,7 +144,6 @@ class FusedScaleMaskSoftmax(nn.Module):
     def forward(self, input, mask):
         # [b, np, sq, sk]
         assert input.dim() == 4
-
         if self.is_kernel_available(mask, *input.size()):
             return self.forward_fused_softmax(input, mask)
         else:
@@ -152,6 +151,8 @@ class FusedScaleMaskSoftmax(nn.Module):
 
     def is_kernel_available(self, mask, b, np, sq, sk):
         attn_batches = b * np
+
+
 
         if (
             self.scaled_masked_softmax_fusion  # user want to fuse

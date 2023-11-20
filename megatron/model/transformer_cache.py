@@ -264,7 +264,6 @@ class CoreAttention(MegatronModule):
 
     def forward(self, query_layer, key_layer,
                 value_layer, attention_mask):
-
         # ===================================
         # Raw attention scores. [b, np, s, s]
         # ===================================
@@ -716,7 +715,7 @@ class ParallelAttentionWithCache(MegatronModule):
             value_layer = cache_v[:src_len, :, :, :]
             # adjust attention_mask to fit the new key_layer
             # [1, 1, sq, sk] -> [1, 1, sq, sk + cache_len]
-            cache_mask = torch.full((1, 1, attention_mask.size(2), cache_len), False, dtype=attention_mask.dtype, device=attention_mask.device)
+            cache_mask = torch.full((1, 1, attention_mask.size(2), cache_len), True, dtype=attention_mask.dtype, device=attention_mask.device)
             # Concatenate the cache mask with the original mask
             attention_mask = torch.cat([cache_mask, attention_mask], dim=-1)
 
@@ -743,7 +742,6 @@ class ParallelAttentionWithCache(MegatronModule):
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
-
         if not self.use_flash_attn:
             # for recompute
             if self.checkpoint_core_attention:
@@ -1736,7 +1734,6 @@ class ParallelTransformerWithCache(MegatronModule):
                         forward_kwargs['cache'] = (k, v)
                         forward_kwargs['cache_seq_len'] = cache_seq_len
                         layer = self._get_layer(index)
-
                         hidden_states, (k_output, v_output) = layer(
                             hidden_states,
                             attention_mask,
