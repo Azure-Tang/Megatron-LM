@@ -238,7 +238,7 @@ def save_rank_0_log(message):
         with open('log.txt', 'a+') as f:
             f.write(message + '\n')
 
-def gpu_logger(message, filename='log.txt', target_rank = -1):
+def gpu_logger(message, filename='log.txt', target_rank=-1):
     '''log gpu information, and save to file'''
     if torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
@@ -263,5 +263,6 @@ def gpu_logger(message, filename='log.txt', target_rank = -1):
     del calling_frame
     
     if target_rank == -1 or target_rank == rank:
+    # if rank == 0:
         with open(filename, 'a+', encoding='utf-8') as f:
             f.write(f'rank: {rank}, by {class_name}{func_name}{func_signature}\n {message} \n')

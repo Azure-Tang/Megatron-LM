@@ -263,15 +263,15 @@ def forward_step_terapipe(
                 data_iterator, model, checkpoint_activations_microbatch
             )
 
-    if parallel_state.is_pipeline_last_stage():
-        if not collect_non_loss_data:
-            output_tensor = loss_func(output_tensor)
-            loss, loss_reduced = output_tensor
-            output_tensor = loss / num_microbatches
-            forward_data_store.append(loss_reduced)
-        else:
-            data = loss_func(output_tensor, non_loss_data=True)
-            forward_data_store.append(data)
+    # if parallel_state.is_pipeline_last_stage():
+    #     if not collect_non_loss_data:
+    #         output_tensor = loss_func(output_tensor)
+    #         loss, loss_reduced = output_tensor
+    #         output_tensor = loss / num_microbatches
+    #         forward_data_store.append(loss_reduced)
+    #     else:
+    #         data = loss_func(output_tensor, non_loss_data=True)
+    #         forward_data_store.append(data)
 
     if config.timers is not None:
         config.timers('forward-compute').stop()
@@ -287,10 +287,10 @@ def forward_step_terapipe(
         return [output_tensor, input_tensor[-1]]
     if unwrap_output_tensor:
         return output_tensor
-    return [output_tensor], cache_output
+    return [output_tensor], cache_output, loss_func
 
 
-def backward_step_terapipe(input_tensor, output_tensor, output_tensor_grad, input_cache, output_cache, model_type, config):
+def backward_step_terapipe(input_tensor, output_tensor, output_tensor_grad, input_caches, output_caches, model_type, config):
     """Backward step through passed-in output tensor.
 
     If last stage, output_tensor_grad is None, otherwise gradient of loss
@@ -319,21 +319,27 @@ def backward_step_terapipe(input_tensor, output_tensor, output_tensor_grad, inpu
         output_tensor = [output_tensor]
     if not isinstance(output_tensor_grad, list):
         output_tensor_grad = [output_tensor_grad]
-    if not isinstance(input_cache, list):
-        input_cache = [input_cache]
-    if not isinstance(output_cache, list):
-        output_cache = [output_cache]
+    if not isinstance(input_caches, list):
+        input_caches = [input_caches]
+    if not isinstance(output_caches, list):
+        output_caches = [output_caches]
 
     # Backward pass.
     if output_tensor_grad[0] is None and config.grad_scale_func is not None:
         output_tensor[0] = config.grad_scale_func(output_tensor[0])
 
-    if config.deallocate_pipeline_outputs:
-        custom_backward(output_tensor[0], output_tensor_grad[0])
-        # if not last slice
-        
-    else:
-        torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
+    # TODO：@@@ 使用custom_backward直接调用c++自动求道引擎会导致反向传播shape对不上
+    # if config.deallocate_pipeline_outputs:
+    #     custom_backward(output_tensor[0], output_tensor_grad[0])
+    #     for in_cache, out_cache in zip(input_caches, output_caches):
+    #         custom_backward(out_cache, in_cache)
+    # else:
+    #     torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
+    
+    
+    torch.autograd.backward(output_tensor+output_caches, grad_tensors=output_tensor_grad+input_caches)
+    for in_cache, out_cache in zip(input_caches, output_caches):
+        torch.autograd.backward(out_cache, in_cache)
 
     # Collect the grad of the input_tensor.
     input_tensor_grad = [None]
@@ -572,10 +578,9 @@ def forward_backward_gpipe_terapipe_without_interleaving(
     # If it is the first iteration, create cache
     iteration = args.iteration
     
-    # Prepare cache & data for terapipe.
     if iteration == 0:
         # create cache
-        # TODO move create cache when init model; delete debug info
+        # TODO move create cache when init model
         cache = model.create_cache()    
         cache_seq_len = 0
     sliced_sequence_len = args.terapipe_slice_len
@@ -614,6 +619,7 @@ def forward_backward_gpipe_terapipe_without_interleaving(
         output_tensors = []
         output_caches = []
         input_caches = []
+        loss_func = None
     forward_data_store = []
     # Run gpipe pipeline forward passes.
     for i in range(num_microbatches):
@@ -621,7 +627,7 @@ def forward_backward_gpipe_terapipe_without_interleaving(
         checkpoint_activations_microbatch = None 
         input_tensor = recv_forward(recv_tensor_shapes, config)
         cache = [c.detach().requires_grad_() for c in cache]
-        output_tensor, cache_output = forward_step_terapipe(
+        output_tensor, cache_output, loss_func = forward_step_terapipe(
             forward_step_func,
             tera_data_iterator,
             model,
@@ -635,21 +641,57 @@ def forward_backward_gpipe_terapipe_without_interleaving(
             checkpoint_activations_microbatch,
         )
         send_forward(output_tensor, send_tensor_shapes, config)
-        
+
         if not forward_only:
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
             input_caches.append(cache)
             output_caches.append(cache_output)
-            deallocate_output_tensor(output_tensor[0], config.deallocate_pipeline_outputs)
+            # # @@@debug
+            # if not parallel_state.is_pipeline_last_stage():
+            #     deallocate_output_tensor(output_tensor[0], config.deallocate_pipeline_outputs)
         cache = cache_output
         cache_seq_len += sliced_sequence_len
     
+    # # @@@debug
+    # # deallocate output_caches & input_caches
+    # for i in range(len(output_caches)):
+    #     for j in range(len(output_caches[i])):
+    #         deallocate_output_tensor(output_caches[i][j], config.deallocate_pipeline_outputs)
+    # for i in range(len(input_caches)):
+    #     for j in range(len(input_caches[i])):
+    #         deallocate_output_tensor(input_caches[i][j], config.deallocate_pipeline_outputs)
+    
+    
+    # calculate loss by loss_func
+    if parallel_state.is_pipeline_last_stage():
+        # cat output_tensors list
+        output_tensors = [t[0] for t in output_tensors]
+        output_tensor = torch.cat(output_tensors, dim=1) 
+        # calculate loss
+        if not collect_non_loss_data:
+            loss, loss_reduced ,loss_mask = loss_func(output_tensor) 
+            forward_data_store.append(loss_reduced)
+        else:
+            data, loss_mask = loss_func(output_tensor, non_loss_data=True)
+            forward_data_store.append(data)
+        # calculate output grad
+        # loss_mask = torch.ones_like()
+        output_tensor_grad = loss_mask.view(-1) / loss_mask.sum()
+        output_tensor_grad = output_tensor_grad.view_as(output_tensor) # 【4，128】
+        # split output grad
+        output_tensor_grads = list(output_tensor_grad.chunk(num_microbatches, dim=1)) # [4, 64]* 2
+
+        # @@@debug
+        # # deallocate output tensor
+        # deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+        # for i in range(len(output_tensors)):
+        #     deallocate_output_tensor(output_tensors[i], config.deallocate_pipeline_outputs)
+
     # Run gpipe pipeline backward passes.
     if not forward_only:
         input_cache = []
         for i in reversed(range(num_microbatches)):
-            # @@@ 梯度同步由num_microbatches - 1改为了0
             if i == 0:
                 if config.grad_sync_func is None or rank == 0:
                     enable_grad_sync()
@@ -657,21 +699,22 @@ def forward_backward_gpipe_terapipe_without_interleaving(
             input_tensor = input_tensors.pop()
             output_tensor = output_tensors.pop()
             if i == num_microbatches - 1:
-                output_cache = None
+                output_cache = []
             else:
                 output_cache = output_caches.pop()
 
-            output_tensor_grad = recv_backward(send_tensor_shapes, config)
-
+            if not parallel_state.is_pipeline_last_stage():
+                output_tensor_grad = recv_backward(send_tensor_shapes, config)
+            else:
+                output_tensor_grad = output_tensor_grads.pop()
             input_tensor_grad = backward_step_terapipe(
                 input_tensor, output_tensor, output_tensor_grad, input_cache, output_cache, model_type, config
             )
             
             send_backward(input_tensor_grad, recv_tensor_shapes, config)
 
-            input_cache = input_caches.pop()
-
-        # Launch any remaining grad reductions
+            input_cache = input_caches.pop() 
+            input_cache = [t.grad for t in input_cache] 
     
     if no_sync_context is not None:
         enable_grad_sync()

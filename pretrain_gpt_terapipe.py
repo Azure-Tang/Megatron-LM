@@ -75,7 +75,31 @@ def get_batch(data_iterator):
     return tokens, labels, loss_mask, attention_mask, position_ids
 
 def loss_func(loss_mask, output_tensor):
+    losses = output_tensor.float()
+    loss_mask = loss_mask.view(-1).float()
+    loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
+
+    # Check individual rank losses are not NaN prior to DP all-reduce.
     args = get_args()
+    if args.check_for_nan_in_loss_and_grad:
+        global_rank = torch.distributed.get_rank()
+        assert not loss.isnan(), (
+            f'Rank {global_rank}: found NaN in local forward loss calculation. '
+            f'Device: {torch.cuda.current_device()}, node: {os.uname()[1]}'
+        )
+
+    # Reduce loss for logging.
+    averaged_loss = average_losses_across_data_parallel_group([loss])
+
+    return loss, {'lm loss': averaged_loss[0]}
+
+def loss_func_terapipe(loss_mask, output_tensor):
+    args = get_args()
+    # modify loss_mask
+    seq_len = args.seq_length
+    loss_mask = torch.ones((loss_mask.size()[0], seq_len), dtype=torch.float, device=loss_mask.device)
+
+    # calculate loss
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
@@ -91,8 +115,7 @@ def loss_func(loss_mask, output_tensor):
     # Reduce loss for logging.
     averaged_loss = average_losses_across_data_parallel_group([loss])
 
-    return loss, {'lm loss': averaged_loss[0]}
-
+    return loss, {'lm loss': averaged_loss[0]}, loss_mask
 
 def forward_step(data_iterator, model, cache, cache_seq_len=0):
     """Forward step."""
@@ -104,13 +127,11 @@ def forward_step(data_iterator, model, cache, cache_seq_len=0):
     tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
         data_iterator)
     timers('batch-generator').stop()
-    from megatron import gpu_logger
-    gpu_logger(f'loss_mask.shape:{loss_mask.shape} \n loss_mask:{loss_mask} \n attention_mask.shape:{attention_mask.shape} \n attention_mask:{attention_mask}')
-
+    # show shapes
     output_tensor, cache_output = model(tokens, position_ids, attention_mask,
                           labels=labels, cache=cache, cache_seq_len=cache_seq_len)
 
-    return output_tensor, partial(loss_func, loss_mask), cache_output
+    return output_tensor, partial(loss_func_terapipe, loss_mask), cache_output
 
 
 def train_valid_test_datasets_provider(train_val_test_num_samples):
